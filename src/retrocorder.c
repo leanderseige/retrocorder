@@ -174,7 +174,7 @@ void startRecording() { pthread_create(&recordingThread, NULL, recordingThreadFu
 bool initSDL() {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) { printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError()); return false; }
     if (TTF_Init() < 0) { printf("TTF could not initialize! TTF_Error: %s\n", TTF_GetError()); return false; }
-    font = TTF_OpenFont("/Library/Fonts/UbuntuMono-Bold.ttf", 24);
+    font = TTF_OpenFont("/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf", 24);
     if (font == NULL) { printf("Failed to load font! TTF_Error: %s\n", TTF_GetError()); return false; }
     
     Uint32 windowFlags = SDL_WINDOW_SHOWN;
