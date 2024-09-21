@@ -12,6 +12,8 @@
 
 #define BUFFER_SIZE 48000 * 10
 #define FRAMES_PER_BUFFER 512
+#define NUM_SAMPLES_DISPLAY 960
+#define SCALING_FACTOR 100.0f
 
 typedef struct {
     float *buffer;
@@ -45,7 +47,7 @@ bool recording = false;
 bool stopRecording = false;
 bool deleteRecording = false;
 Uint32 startTime = 0;
-float waveform[960];
+float waveform[NUM_SAMPLES_DISPLAY];
 char savePath[256] = "";
 pthread_t recordingThread;
 PaDeviceIndex deviceIndex;
@@ -83,13 +85,21 @@ void loadConfig(const char *filename) {
     if (ini_parse(filename, configHandler, &config) < 0) printf("Can't load config file: %s\n", filename);
 }
 
-static int recordCallback(const void *inputBuffer, void *outputBuffer, unsigned long framesPerBuffer, const PaStreamCallbackTimeInfo *timeInfo, PaStreamCallbackFlags statusFlags, void *userData) {
+static int recordCallback(const void *inputBuffer, void *outputBuffer,
+                          unsigned long framesPerBuffer, const PaStreamCallbackTimeInfo *timeInfo,
+                          PaStreamCallbackFlags statusFlags, void *userData) {
     AudioData *data = (AudioData *)userData;
     const float *in = (const float *)inputBuffer;
     unsigned long i;
-    if (inputBuffer == NULL) for (i = 0; i < framesPerBuffer; i++) data->buffer[data->frameIndex++] = 0.0f;
-    else for (i = 0; i < framesPerBuffer; i++) if (data->frameIndex < data->maxFrames) data->buffer[data->frameIndex++] = *in++;
-    else stopRecording = true;
+    if (inputBuffer == NULL)
+        for (i = 0; i < framesPerBuffer; i++)
+            data->buffer[data->frameIndex++] = 0.0f;
+    else
+        for (i = 0; i < framesPerBuffer; i++)
+            if (data->frameIndex < data->maxFrames)
+                data->buffer[data->frameIndex++] = *in++;
+            else
+                stopRecording = true;
     return stopRecording ? paComplete : paContinue;
 }
 
@@ -99,7 +109,10 @@ void saveAudio(const char *filename) {
     sfinfo.samplerate = config.sampleRate;
     sfinfo.format = (config.resolution == 16) ? (SF_FORMAT_WAV | SF_FORMAT_PCM_16) : (SF_FORMAT_WAV | SF_FORMAT_PCM_24);
     SNDFILE *file = sf_open(filename, SFM_WRITE, &sfinfo);
-    if (!file) { printf("Failed to open file: %s\n", sf_strerror(file)); return; }
+    if (!file) {
+        printf("Failed to open file: %s\n", sf_strerror(file));
+        return;
+    }
     sf_write_float(file, audioData.buffer, audioData.frameIndex);
     sf_close(file);
 }
@@ -123,31 +136,69 @@ void drawButton(SDL_Rect *button, const char *label) {
 }
 
 void drawUI() {
-    SDL_SetRenderDrawColor(renderer, config.bgColor.r, config.bgColor.g, config.bgColor.b, 255);
-    SDL_RenderClear(renderer);
     drawButton(&recButton, "REC");
     drawButton(&stopButton, "STOP");
     drawButton(&deleteButton, "DELETE");
     drawButton(&exitButton, "EXIT");
-    if (strlen(savePath) > 0) renderTextCentered(savePath, recordingLabel, config.fgColor);
+    if (strlen(savePath) > 0)
+        renderTextCentered(savePath, recordingLabel, config.fgColor);
     Uint32 elapsed = recording ? (SDL_GetTicks() - startTime) / 1000 : 0;
     char timeText[32];
     snprintf(timeText, 32, "Time: %02d:%02d", elapsed / 60, elapsed % 60);
     renderTextCentered(timeText, bottomRegion, recording ? config.recColor : config.timeColor);
-    SDL_RenderPresent(renderer);
 }
 
 void updateWaveform() {
-    for (int i = 0; i < 960; i++) waveform[i] = audioData.buffer[i * (audioData.frameIndex / 960)] * 100.0f;
+    int numSamplesToDisplay = NUM_SAMPLES_DISPLAY;
+    int frameIndex = audioData.frameIndex;
+    int startSample = frameIndex - numSamplesToDisplay;
+    if (startSample < 0) startSample = 0;
+    int samplesToCopy = frameIndex - startSample;
+    if (samplesToCopy > numSamplesToDisplay) samplesToCopy = numSamplesToDisplay;
+
+    // Copy samples to waveform
+    for (int i = 0; i < samplesToCopy; i++) {
+        waveform[i] = audioData.buffer[startSample + i] * SCALING_FACTOR;
+    }
+    // Fill remaining with zero if any
+    for (int i = samplesToCopy; i < numSamplesToDisplay; i++) {
+        waveform[i] = 0;
+    }
+
+    // Draw waveform
+    SDL_SetRenderDrawColor(renderer, config.bgColor.r, config.bgColor.g, config.bgColor.b, 255);
+    SDL_RenderClear(renderer);
+
     drawUI();
+
     SDL_SetRenderDrawColor(renderer, config.fgColor.r, config.fgColor.g, config.fgColor.b, 255);
-    for (int i = 0; i < 959; i++) SDL_RenderDrawLine(renderer, i, waveformRegion.y + waveform[i], i + 1, waveformRegion.y + waveform[i + 1]);
+    int centerY = waveformRegion.y + waveformRegion.h / 2;
+    for (int i = 0; i < numSamplesToDisplay - 1; i++) {
+        SDL_RenderDrawLine(renderer, i, centerY - waveform[i], i + 1, centerY - waveform[i + 1]);
+    }
     SDL_RenderPresent(renderer);
 }
 
 void showFullWaveform() {
+    int totalSamples = audioData.frameIndex;
+    int waveformWidth = waveformRegion.w;
+    float samplesPerPixel = (float)totalSamples / waveformWidth;
+
+    SDL_SetRenderDrawColor(renderer, config.bgColor.r, config.bgColor.g, config.bgColor.b, 255);
+    SDL_RenderClear(renderer);
+
+    drawUI();
+
     SDL_SetRenderDrawColor(renderer, config.fgColor.r, config.fgColor.g, config.fgColor.b, 255);
-    for (int i = 0; i < 959; i++) SDL_RenderDrawLine(renderer, i, waveformRegion.y + audioData.buffer[i * (audioData.frameIndex / 960)] * 100.0f, i + 1, waveformRegion.y + audioData.buffer[(i + 1) * (audioData.frameIndex / 960)] * 100.0f);
+    int centerY = waveformRegion.y + waveformRegion.h / 2;
+    for (int x = 0; x < waveformWidth - 1; x++) {
+        int sampleIndex1 = (int)(x * samplesPerPixel);
+        int sampleIndex2 = (int)((x + 1) * samplesPerPixel);
+        if (sampleIndex2 >= totalSamples) sampleIndex2 = totalSamples - 1;
+        float y1 = audioData.buffer[sampleIndex1] * SCALING_FACTOR;
+        float y2 = audioData.buffer[sampleIndex2] * SCALING_FACTOR;
+        SDL_RenderDrawLine(renderer, x, centerY - y1, x + 1, centerY - y2);
+    }
     SDL_RenderPresent(renderer);
 }
 
@@ -157,36 +208,61 @@ void *recordingThreadFunction(void *arg) {
     audioData.frameIndex = 0;
     stopRecording = false;
     err = Pa_OpenDefaultStream(&stream, config.channels, 0, paFloat32, config.sampleRate, FRAMES_PER_BUFFER, recordCallback, &audioData);
-    if (err != paNoError) { printf("PortAudio error: %s\n", Pa_GetErrorText(err)); return NULL; }
+    if (err != paNoError) {
+        printf("PortAudio error: %s\n", Pa_GetErrorText(err));
+        return NULL;
+    }
     err = Pa_StartStream(stream);
-    if (err != paNoError) { printf("PortAudio error: %s\n", Pa_GetErrorText(err)); return NULL; }
+    if (err != paNoError) {
+        printf("PortAudio error: %s\n", Pa_GetErrorText(err));
+        return NULL;
+    }
     recording = true;
     startTime = SDL_GetTicks();
-    while (Pa_IsStreamActive(stream) == 1 && !stopRecording) SDL_Delay(100);
+    while (Pa_IsStreamActive(stream) == 1 && !stopRecording)
+        SDL_Delay(100);
     err = Pa_CloseStream(stream);
-    if (err != paNoError) printf("PortAudio error: %s\n", Pa_GetErrorText(err));
+    if (err != paNoError)
+        printf("PortAudio error: %s\n", Pa_GetErrorText(err));
     recording = false;
     return NULL;
 }
 
-void startRecording() { pthread_create(&recordingThread, NULL, recordingThreadFunction, NULL); }
+void startRecording() {
+    pthread_create(&recordingThread, NULL, recordingThreadFunction, NULL);
+}
 
 bool initSDL() {
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) { printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError()); return false; }
-    if (TTF_Init() < 0) { printf("TTF could not initialize! TTF_Error: %s\n", TTF_GetError()); return false; }
-    font = TTF_OpenFont("/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf", 24);
-    if (font == NULL) { printf("Failed to load font! TTF_Error: %s\n", TTF_GetError()); return false; }
-    
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
+        return false;
+    }
+    if (TTF_Init() < 0) {
+        printf("TTF could not initialize! TTF_Error: %s\n", TTF_GetError());
+        return false;
+    }
+    font = TTF_OpenFont("/Library/Fonts/UbuntuMono-Bold.ttf", 24);
+    if (font == NULL) {
+        printf("Failed to load font! TTF_Error: %s\n", TTF_GetError());
+        return false;
+    }
+
     Uint32 windowFlags = SDL_WINDOW_SHOWN;
     if (config.fullscreen) {
         windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
 
     window = SDL_CreateWindow("Retro Audio Recorder", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 960, 540, windowFlags);
-    if (window == NULL) { printf("Window could not be created! SDL_Error: %s\n", SDL_GetError()); return false; }
+    if (window == NULL) {
+        printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
+        return false;
+    }
 
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (renderer == NULL) { printf("Renderer could not be created! SDL_Error: %s\n", SDL_GetError()); return false; }
+    if (renderer == NULL) {
+        printf("Renderer could not be created! SDL_Error: %s\n", SDL_GetError());
+        return false;
+    }
 
     // Set the logical size for the renderer to 960x540
     SDL_RenderSetLogicalSize(renderer, 960, 540);  // Maintains proportions in fullscreen
@@ -197,13 +273,12 @@ bool initSDL() {
     stopButton = (SDL_Rect){screenWidth / 4 + 5, 10, buttonWidth, buttonHeight};
     deleteButton = (SDL_Rect){screenWidth / 2 + 5, 10, buttonWidth, buttonHeight};
     exitButton = (SDL_Rect){3 * screenWidth / 4 + 5, 10, buttonWidth, buttonHeight};
-    waveformRegion = (SDL_Rect){0, screenHeight * 2 / 3, screenWidth, regionHeight / 2};
+    waveformRegion = (SDL_Rect){0, regionHeight, screenWidth, regionHeight * 2};
     recordingLabel = (SDL_Rect){10, regionHeight * 2 + 5, 940, (regionHeight / 2) - 10};
     bottomRegion = (SDL_Rect){10, regionHeight * 2 + (regionHeight / 2) + 5, 940, (regionHeight / 2) - 10};
 
     return true;
 }
-
 
 int main(int argc, char *argv[]) {
     loadConfig("config.ini");
@@ -212,20 +287,90 @@ int main(int argc, char *argv[]) {
     audioData.buffer = (float *)malloc(BUFFER_SIZE * sizeof(float));
     audioData.maxFrames = BUFFER_SIZE;
     bool quit = false;
+
+    // Declare these at the top of your file
+    int screenWidth = 960;
+    int screenHeight = 540;
+
+    // Add these variables to keep track of touch positions
+    int touchStartX = -1, touchStartY = -1;
+    const int TOUCH_THRESHOLD = 10; // pixels
+
     SDL_Event event;
     while (!quit) {
         while (SDL_PollEvent(&event) != 0) {
-            if (event.type == SDL_QUIT) quit = true;
-            if (event.type == SDL_MOUSEBUTTONDOWN) {
+            if (event.type == SDL_QUIT) {
+                quit = true;
+            }
+            // Handle mouse events
+            else if (event.type == SDL_MOUSEBUTTONDOWN) {
                 int x = event.button.x, y = event.button.y;
-                if (SDL_PointInRect(&(SDL_Point){x, y}, &recButton) && !recording) startRecording();
-                else if (SDL_PointInRect(&(SDL_Point){x, y}, &stopButton) && recording) { stopRecording = true; pthread_join(recordingThread, NULL); sprintf(savePath, "recording-%ld.wav", time(NULL)); saveAudio(savePath); showFullWaveform(); }
-                else if (SDL_PointInRect(&(SDL_Point){x, y}, &deleteButton)) { deleteRecording = true; strcpy(savePath, ""); memset(audioData.buffer, 0, BUFFER_SIZE * sizeof(float)); }
-                else if (SDL_PointInRect(&(SDL_Point){x, y}, &exitButton)) quit = true;
+                touchStartX = x;
+                touchStartY = y;
+            }
+            else if (event.type == SDL_MOUSEBUTTONUP) {
+                int x = event.button.x, y = event.button.y;
+                if (touchStartX != -1 && touchStartY != -1 &&
+                    abs(x - touchStartX) <= TOUCH_THRESHOLD &&
+                    abs(y - touchStartY) <= TOUCH_THRESHOLD) {
+                    // Treat as a click
+                    if (SDL_PointInRect(&(SDL_Point){x, y}, &recButton) && !recording) {
+                        startRecording();
+                    } else if (SDL_PointInRect(&(SDL_Point){x, y}, &stopButton) && recording) {
+                        stopRecording = true;
+                        pthread_join(recordingThread, NULL);
+                        sprintf(savePath, "recording-%ld.wav", time(NULL));
+                        saveAudio(savePath);
+                        showFullWaveform();
+                    } else if (SDL_PointInRect(&(SDL_Point){x, y}, &deleteButton)) {
+                        deleteRecording = true;
+                        strcpy(savePath, "");
+                        memset(audioData.buffer, 0, BUFFER_SIZE * sizeof(float));
+                    } else if (SDL_PointInRect(&(SDL_Point){x, y}, &exitButton)) {
+                        quit = true;
+                    }
+                }
+                touchStartX = -1;
+                touchStartY = -1;
+            }
+            // Handle touch events
+            else if (event.type == SDL_FINGERDOWN) {
+                touchStartX = (int)(event.tfinger.x * screenWidth);
+                touchStartY = (int)(event.tfinger.y * screenHeight);
+            }
+            else if (event.type == SDL_FINGERUP) {
+                int x = (int)(event.tfinger.x * screenWidth);
+                int y = (int)(event.tfinger.y * screenHeight);
+                if (touchStartX != -1 && touchStartY != -1 &&
+                    abs(x - touchStartX) <= TOUCH_THRESHOLD &&
+                    abs(y - touchStartY) <= TOUCH_THRESHOLD) {
+                    // Treat as a click
+                    if (SDL_PointInRect(&(SDL_Point){x, y}, &recButton) && !recording) {
+                        startRecording();
+                    } else if (SDL_PointInRect(&(SDL_Point){x, y}, &stopButton) && recording) {
+                        stopRecording = true;
+                        pthread_join(recordingThread, NULL);
+                        sprintf(savePath, "recording-%ld.wav", time(NULL));
+                        saveAudio(savePath);
+                        showFullWaveform();
+                    } else if (SDL_PointInRect(&(SDL_Point){x, y}, &deleteButton)) {
+                        deleteRecording = true;
+                        strcpy(savePath, "");
+                        memset(audioData.buffer, 0, BUFFER_SIZE * sizeof(float));
+                    } else if (SDL_PointInRect(&(SDL_Point){x, y}, &exitButton)) {
+                        quit = true;
+                    }
+                }
+                touchStartX = -1;
+                touchStartY = -1;
             }
         }
-        if (recording) updateWaveform();
-        else drawUI();
+        if (recording) {
+            updateWaveform();
+        } else {
+            drawUI();
+            SDL_RenderPresent(renderer);
+        }
         SDL_Delay(16);
     }
     free(audioData.buffer);
@@ -237,4 +382,3 @@ int main(int argc, char *argv[]) {
     SDL_Quit();
     return 0;
 }
-
