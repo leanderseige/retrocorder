@@ -1,3 +1,7 @@
+*.wav
+retrocorder
+listdevices
+
 # Prerequisites
 *.d
 
